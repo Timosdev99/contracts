@@ -2,174 +2,151 @@
 pragma solidity ^0.8.20;
 
 import "../interfaces/IPaymentEscrow.sol";
+import "../interfaces/ILPRegistry.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /// @title PaymentEscrow
-/// @notice Trustless escrow for crypto-to-fiat payments
-/// @dev Multi-chain compatible (Polygon, Base, Ethereum)
+/// @notice A decentralized escrow for crypto-to-fiat payments.
+/// @dev This contract implements the "Permission Slip" model for LP prioritization
+/// and relies on a multi-sig oracle for final settlement.
 contract PaymentEscrow is IPaymentEscrow, ReentrancyGuard, Pausable, AccessControl {
-    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
-    bytes32 public constant RATE_ORACLE_ROLE = keccak256("RATE_ORACLE_ROLE");
+    using ECDSA for bytes32;
 
-    // Supported stablecoins
+    // --- State Variables ---
+
+    ILPRegistry public lpRegistry;
+    address public oracleWallet; // The multi-sig wallet of the Oracle Consortium
+    address public permissionSlipSigner; // The off-chain service that issues permission slips
+
     mapping(address => bool) public supportedTokens;
-
-    // Payment ID => Payment
     mapping(bytes32 => Payment) public payments;
 
-    // Fee configuration
-    uint256 public platformFeePercent = 50; // 0.5% (basis points: 50/10000)
+    uint256 public platformFeePercent = 50; // 0.5% in basis points (50/10000)
     address public feeCollector;
 
-    // Rate oracle (updated by authorized oracle)
-    mapping(string => uint256) public exchangeRates; // Currency => Rate (6 decimals)
-    mapping(string => uint256) public rateLastUpdated;
-
-    // Security: Rate deviation limits
-    uint256 public constant MAX_RATE_DEVIATION = 500; // 5% max change
-
-    // Timeouts
     uint256 public constant PAYMENT_DEADLINE = 2 hours;
-    uint256 public constant DISPUTE_PERIOD = 7 days;
 
-    constructor(address _feeCollector) {
-        require(_feeCollector != address(0), "Fee collector is zero address");
+    // --- Constructor ---
+
+    constructor(
+        address _feeCollector,
+        address _lpRegistryAddress,
+        address _oracleWallet,
+        address _permissionSlipSigner
+    ) {
+        require(_feeCollector != address(0), "ZERO_ADDRESS");
+        require(_lpRegistryAddress != address(0), "ZERO_ADDRESS");
+        require(_oracleWallet != address(0), "ZERO_ADDRESS");
+        require(_permissionSlipSigner != address(0), "ZERO_ADDRESS");
+
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(OPERATOR_ROLE, msg.sender);
-        _grantRole(RATE_ORACLE_ROLE, msg.sender);
         feeCollector = _feeCollector;
+        lpRegistry = ILPRegistry(_lpRegistryAddress);
+        oracleWallet = _oracleWallet;
+        permissionSlipSigner = _permissionSlipSigner;
     }
 
-    /// @notice User creates payment and locks stablecoin
+    // --- Core Payment Flow ---
+
+    /// @notice User creates a payment to initiate an off-ramp, locking their stablecoin.
+    /// @param token The address of the stablecoin being sold.
+    /// @param amount The amount of stablecoin to sell.
+    /// @param fiatAmount The target amount of fiat currency to be received.
+    /// @param fiatCurrency The symbol of the fiat currency (e.g., "NGN").
+    /// @param recipientHash A hash of the recipient's off-chain details.
     function createPayment(
         address token,
         uint256 amount,
+        uint256 fiatAmount,
         string calldata fiatCurrency,
         bytes32 recipientHash
     ) external nonReentrant whenNotPaused returns (bytes32 paymentId) {
-        require(supportedTokens[token], "Token not supported");
-        require(amount > 0, "Amount must be > 0");
-        require(exchangeRates[fiatCurrency] > 0, "Currency not supported");
+        require(supportedTokens[token], "TOKEN_NOT_SUPPORTED");
+        require(amount > 0, "AMOUNT_IS_ZERO");
 
         // Transfer stablecoin from user to escrow
         IERC20(token).transferFrom(msg.sender, address(this), amount);
 
-        // Calculate fiat amount based on current rate
-        uint256 rate = exchangeRates[fiatCurrency];
-
         // Deduct platform fee
         uint256 fee = (amount * platformFeePercent) / 10000;
         uint256 netAmount = amount - fee;
-        uint256 netFiatAmount = (netAmount * rate) / 1e6;
 
-        // Generate unique payment ID
-        paymentId = keccak256(
-            abi.encodePacked(
-                msg.sender,
-                token,
-                amount,
-                recipientHash,
-                block.timestamp
-            )
-        );
+        paymentId = keccak256(abi.encodePacked(msg.sender, token, amount, recipientHash, block.timestamp));
 
-        // Store payment
         payments[paymentId] = Payment({
             sender: msg.sender,
             token: token,
             amount: netAmount,
             fiatCurrency: fiatCurrency,
-            fiatAmount: netFiatAmount,
-            exchangeRate: rate,
+            fiatAmount: fiatAmount,
+            exchangeRate: 0, // rate is now implicit in fiatAmount
             recipientHash: recipientHash,
             createdAt: block.timestamp,
             deadline: block.timestamp + PAYMENT_DEADLINE,
             status: PaymentStatus.Pending,
             bankReference: "",
-            operator: address(0)
+            operator: address(0) // The LP who will process the payment
         });
 
-        // Transfer fee to collector
         if (fee > 0) {
             IERC20(token).transfer(feeCollector, fee);
         }
 
-        emit PaymentCreated(
-            paymentId,
-            msg.sender,
-            token,
-            netAmount,
-            fiatCurrency,
-            netFiatAmount
-        );
-
+        emit PaymentCreated(paymentId, msg.sender, token, netAmount, fiatCurrency, fiatAmount);
         return paymentId;
     }
 
-    /// @notice Operator marks payment as processing after initiating bank transfer
-    function markProcessing(
-        bytes32 paymentId,
-        string calldata bankReference
-    ) external onlyRole(OPERATOR_ROLE) {
+    /// @notice An active LP claims a pending payment using a valid permission slip.
+    /// @param paymentId The ID of the payment to claim.
+    /// @param permissionSlip A signature from the permissionSlipSigner, authorizing this action.
+    function claimPayment(bytes32 paymentId, bytes calldata permissionSlip) external whenNotPaused {
         Payment storage payment = payments[paymentId];
-        require(payment.status == PaymentStatus.Pending, "Invalid status");
-        require(block.timestamp <= payment.deadline, "Payment expired");
+        require(payment.status == PaymentStatus.Pending, "NOT_PENDING");
+        require(lpRegistry.isLPActive(msg.sender), "NOT_ACTIVE_LP");
+
+        // Verify the permission slip was signed by the trusted signer for this specific payment and LP
+        bytes32 messageHash = keccak256(abi.encodePacked(paymentId, msg.sender));
+        address signer = messageHash.recover(permissionSlip);
+        require(signer == permissionSlipSigner, "INVALID_SLIP");
 
         payment.status = PaymentStatus.Processing;
-        payment.bankReference = bankReference;
-        payment.operator = msg.sender;
+        payment.operator = msg.sender; // Assign the LP as the operator
 
-        emit PaymentProcessing(paymentId, msg.sender, bankReference);
+        emit PaymentProcessing(paymentId, msg.sender, ""); // Bank reference can be updated later if needed
     }
 
-    /// @notice Complete payment after bank transfer confirmed
-    function completePayment(
-        bytes32 paymentId,
-        bytes32 proofHash
-    ) external onlyRole(OPERATOR_ROLE) nonReentrant {
-        Payment storage payment = payments[paymentId];
-        require(payment.status == PaymentStatus.Processing, "Must be processing");
-        require(payment.operator == msg.sender, "Not assigned operator");
+    /// @notice Called by the Oracle (Multi-Sig Wallet) to confirm settlement.
+    /// @dev This function releases the escrowed funds to the LP after the oracle has
+    /// verified the fiat transfer was successfully completed off-chain.
+    /// @param paymentId The ID of the payment to settle.
+    function confirmSettlement(bytes32 paymentId) external nonReentrant {
+        require(msg.sender == oracleWallet, "UNAUTHORIZED_ORACLE");
 
-        // Transfer stablecoin to operator wallet
+        Payment storage payment = payments[paymentId];
+        require(payment.status == PaymentStatus.Processing, "NOT_PROCESSING");
+        require(payment.operator != address(0), "OPERATOR_NOT_ASSIGNED");
+
+        // Transfer the escrowed stablecoin to the LP who processed the payment
         IERC20(payment.token).transfer(payment.operator, payment.amount);
 
         payment.status = PaymentStatus.Completed;
 
-        emit PaymentCompleted(paymentId, proofHash);
+        emit PaymentCompleted(paymentId, bytes32(0)); // proofHash is no longer needed here
     }
 
-    /// @notice Refund user if payment fails
-    function refundPayment(
-        bytes32 paymentId,
-        string calldata reason
-    ) external onlyRole(OPERATOR_ROLE) nonReentrant {
-        Payment storage payment = payments[paymentId];
-        require(
-            payment.status == PaymentStatus.Pending ||
-            payment.status == PaymentStatus.Processing,
-            "Cannot refund"
-        );
-
-        // Return stablecoin to user
-        IERC20(payment.token).transfer(payment.sender, payment.amount);
-
-        payment.status = PaymentStatus.Refunded;
-
-        emit PaymentRefunded(paymentId, reason);
-    }
-
-    /// @notice User can claim refund if deadline passed
+    /// @notice Allows the original sender to claim a refund if the payment is not
+    /// processed before the deadline.
     function claimRefund(bytes32 paymentId) external nonReentrant {
         Payment storage payment = payments[paymentId];
-        require(payment.sender == msg.sender, "Not payment sender");
-        require(payment.status == PaymentStatus.Pending, "Not pending");
-        require(block.timestamp > payment.deadline, "Deadline not passed");
+        require(payment.sender == msg.sender, "NOT_SENDER");
+        require(payment.status == PaymentStatus.Pending, "NOT_PENDING"); // Only if never claimed
+        require(block.timestamp > payment.deadline, "DEADLINE_NOT_PASSED");
 
-        // Automatic refund after deadline
+        // Return the net amount to the user
         IERC20(payment.token).transfer(payment.sender, payment.amount);
 
         payment.status = PaymentStatus.Refunded;
@@ -177,99 +154,45 @@ contract PaymentEscrow is IPaymentEscrow, ReentrancyGuard, Pausable, AccessContr
         emit PaymentRefunded(paymentId, "Deadline expired");
     }
 
-    /// @notice Sender raises a dispute for a payment in process
-    function disputePayment(bytes32 paymentId) external {
-        Payment storage payment = payments[paymentId];
-        require(payment.sender == msg.sender, "Not payment sender");
-        require(payment.status == PaymentStatus.Processing, "Not processing");
-        // Optional: Add a time window for disputes after processing starts
-        // require(block.timestamp < payment.deadline + DISPUTE_PERIOD, "Dispute period over");
+    // --- Admin Functions ---
 
-        payment.status = PaymentStatus.Disputed;
-        emit PaymentDisputed(paymentId, msg.sender);
-    }
-
-    /// @notice Admin resolves a dispute
-    function resolveDispute(
-        bytes32 paymentId,
-        bool refundToSender
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
-        Payment storage payment = payments[paymentId];
-        require(payment.status == PaymentStatus.Disputed, "Not in dispute");
-
-        if (refundToSender) {
-            // Refund to the original sender
-            IERC20(payment.token).transfer(payment.sender, payment.amount);
-            payment.status = PaymentStatus.Refunded;
-            emit DisputeResolved(paymentId, msg.sender, payment.sender);
-            emit PaymentRefunded(paymentId, "Dispute resolved to sender");
-        } else {
-            // Complete payment to the assigned operator
-            require(payment.operator != address(0), "Operator not assigned");
-            IERC20(payment.token).transfer(payment.operator, payment.amount);
-            payment.status = PaymentStatus.Completed;
-            emit DisputeResolved(paymentId, msg.sender, payment.operator);
-        }
-    }
-
-    /// @notice Update exchange rate (called by oracle)
-    function updateExchangeRate(
-        string calldata currency,
-        uint256 newRate
-    ) external onlyRole(RATE_ORACLE_ROLE) {
-        require(newRate > 0, "Rate must be > 0");
-
-        uint256 oldRate = exchangeRates[currency];
-
-        // Prevent sudden rate changes (security)
-        if (oldRate > 0) {
-            uint256 deviation = oldRate > newRate
-                ? ((oldRate - newRate) * 10000) / oldRate
-                : ((newRate - oldRate) * 10000) / oldRate;
-            
-            require(
-                deviation <= MAX_RATE_DEVIATION,
-                "Rate change too large"
-            );
-        }
-
-        exchangeRates[currency] = newRate;
-        rateLastUpdated[currency] = block.timestamp;
-
-        emit ExchangeRateUpdated(currency, newRate);
-    }
-
-    /// @notice Add supported token
     function addSupportedToken(address token) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(token != address(0), "Token is zero address");
+        require(token != address(0), "ZERO_ADDRESS");
         supportedTokens[token] = true;
         emit SupportedTokenAdded(token);
     }
 
-    /// @notice Remove supported token
     function removeSupportedToken(address token) external onlyRole(DEFAULT_ADMIN_ROLE) {
         supportedTokens[token] = false;
         emit SupportedTokenRemoved(token);
     }
 
-    /// @notice Update platform fee
     function setPlatformFee(uint256 newFee) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(newFee <= 200, "Fee too high (max 2%)"); // 200 basis points = 2%
+        require(newFee <= 200, "FEE_TOO_HIGH"); // Max 2%
         platformFeePercent = newFee;
         emit PlatformFeeUpdated(newFee);
     }
 
-    /// @notice Emergency pause
+    function setPermissionSlipSigner(address _newSigner) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_newSigner != address(0), "ZERO_ADDRESS");
+        permissionSlipSigner = _newSigner;
+    }
+
+    function setOracleWallet(address _newOracle) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(_newOracle != address(0), "ZERO_ADDRESS");
+        oracleWallet = _newOracle;
+    }
+
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
 
-    /// @notice Emergency unpause
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
     }
 
-    /// @notice Get payment details
+    // --- View Functions ---
+
     function getPayment(bytes32 paymentId) external view returns (Payment memory) {
         return payments[paymentId];
     }

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 /// @title IPaymentEscrow
-/// @notice Interface for the trustless escrow for crypto-to-fiat payments.
+/// @notice Interface for the decentralized escrow for crypto-to-fiat payments.
 interface IPaymentEscrow {
     // --- Enums and Structs ---
 
@@ -10,8 +10,7 @@ interface IPaymentEscrow {
         Pending,
         Processing,
         Completed,
-        Refunded,
-        Disputed
+        Refunded
     }
 
     struct Payment {
@@ -26,7 +25,7 @@ interface IPaymentEscrow {
         uint256 deadline;
         PaymentStatus status;
         string bankReference;
-        address operator;
+        address operator; // The assigned LP
     }
 
     // --- Events ---
@@ -50,21 +49,9 @@ interface IPaymentEscrow {
 
     event PaymentRefunded(bytes32 indexed paymentId, string reason);
 
-    event PaymentDisputed(bytes32 indexed paymentId, address indexed disputer);
-
-    event DisputeResolved(
-        bytes32 indexed paymentId,
-        address indexed resolver,
-        address winner
-    );
-
-    event ExchangeRateUpdated(string currency, uint256 newRate);
-
     event SupportedTokenAdded(address indexed token);
 
     event SupportedTokenRemoved(address indexed token);
-
-
 
     event PlatformFeeUpdated(uint256 newFeePercent);
 
@@ -73,33 +60,26 @@ interface IPaymentEscrow {
     function createPayment(
         address token,
         uint256 amount,
+        uint256 fiatAmount,
         string calldata fiatCurrency,
         bytes32 recipientHash
     ) external returns (bytes32 paymentId);
 
-    function markProcessing(
-        bytes32 paymentId,
-        string calldata bankReference
-    ) external;
+    function claimPayment(bytes32 paymentId, bytes calldata permissionSlip) external;
 
-    function completePayment(bytes32 paymentId, bytes32 proofHash) external;
-
-    function refundPayment(bytes32 paymentId, string calldata reason) external;
+    function confirmSettlement(bytes32 paymentId) external;
 
     function claimRefund(bytes32 paymentId) external;
-
-    function disputePayment(bytes32 paymentId) external;
-
-    function resolveDispute(bytes32 paymentId, bool refundToSender) external;
-
-    function updateExchangeRate(string calldata currency, uint256 newRate)
-        external;
 
     function addSupportedToken(address token) external;
 
     function removeSupportedToken(address token) external;
 
     function setPlatformFee(uint256 newFee) external;
+
+    function setPermissionSlipSigner(address _newSigner) external;
+
+    function setOracleWallet(address _newOracle) external;
 
     function pause() external;
 
