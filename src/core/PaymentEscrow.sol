@@ -69,7 +69,7 @@ contract PaymentEscrow is IPaymentEscrow, ReentrancyGuard, Pausable, AccessContr
         require(amount > 0, "AMOUNT_IS_ZERO");
 
         // Transfer stablecoin from user to escrow
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        require(IERC20(token).transferFrom(msg.sender, address(this), amount), "TRANSFER_FAILED");
 
         // Deduct platform fee
         uint256 fee = (amount * platformFeePercent) / 10000;
@@ -93,7 +93,7 @@ contract PaymentEscrow is IPaymentEscrow, ReentrancyGuard, Pausable, AccessContr
         });
 
         if (fee > 0) {
-            IERC20(token).transfer(feeCollector, fee);
+            require(IERC20(token).transfer(feeCollector, fee), "FEE_TRANSFER_FAILED");
         }
 
         emit PaymentCreated(paymentId, msg.sender, token, netAmount, fiatCurrency, fiatAmount);
@@ -131,7 +131,7 @@ contract PaymentEscrow is IPaymentEscrow, ReentrancyGuard, Pausable, AccessContr
         require(payment.operator != address(0), "OPERATOR_NOT_ASSIGNED");
 
         // Transfer the escrowed stablecoin to the LP who processed the payment
-        IERC20(payment.token).transfer(payment.operator, payment.amount);
+        require(IERC20(payment.token).transfer(payment.operator, payment.amount), "TRANSFER_FAILED");
 
         payment.status = PaymentStatus.Completed;
 
@@ -147,7 +147,7 @@ contract PaymentEscrow is IPaymentEscrow, ReentrancyGuard, Pausable, AccessContr
         require(block.timestamp > payment.deadline, "DEADLINE_NOT_PASSED");
 
         // Return the net amount to the user
-        IERC20(payment.token).transfer(payment.sender, payment.amount);
+        require(IERC20(payment.token).transfer(payment.sender, payment.amount), "REFUND_TRANSFER_FAILED");
 
         payment.status = PaymentStatus.Refunded;
 

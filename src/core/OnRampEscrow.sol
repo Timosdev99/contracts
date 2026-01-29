@@ -63,7 +63,7 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
         order.status = OrderStatus.FundsLocked;
         order.fundsLockedAt = block.timestamp;
 
-        IERC20(order.token).transferFrom(msg.sender, address(this), order.tokenAmount);
+        require(IERC20(order.token).transferFrom(msg.sender, address(this), order.tokenAmount), "LOCK_TRANSFER_FAILED");
 
         emit FundsLocked(orderId, msg.sender, order.tokenAmount);
     }
@@ -88,7 +88,7 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
         require(order.status == OrderStatus.FiatSent, "Fiat not marked as sent");
 
         order.status = OrderStatus.Completed;
-        IERC20(order.token).transfer(order.buyer, order.tokenAmount);
+        require(IERC20(order.token).transfer(order.buyer, order.tokenAmount), "RELEASE_TRANSFER_FAILED");
 
         emit OrderCompleted(orderId, order.buyer);
     }
@@ -101,7 +101,7 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
         require(block.timestamp > order.fundsLockedAt + paymentDeadline, "Payment deadline not passed");
 
         order.status = OrderStatus.Cancelled;
-        IERC20(order.token).transfer(order.lp, order.tokenAmount);
+        require(IERC20(order.token).transfer(order.lp, order.tokenAmount), "RECLAIM_TRANSFER_FAILED");
 
         emit OrderCancelled(orderId, "User payment timed out");
     }
@@ -136,11 +136,11 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
 
         if (releaseToBuyer) {
             order.status = OrderStatus.Completed;
-            IERC20(order.token).transfer(order.buyer, order.tokenAmount);
+            require(IERC20(order.token).transfer(order.buyer, order.tokenAmount), "DISPUTE_BUYER_TRANSFER_FAILED");
             emit DisputeResolved(orderId, msg.sender, order.buyer);
         } else {
             order.status = OrderStatus.Cancelled;
-            IERC20(order.token).transfer(order.lp, order.tokenAmount);
+            require(IERC20(order.token).transfer(order.lp, order.tokenAmount), "DISPUTE_LP_TRANSFER_FAILED");
             emit DisputeResolved(orderId, msg.sender, order.lp);
         }
     }

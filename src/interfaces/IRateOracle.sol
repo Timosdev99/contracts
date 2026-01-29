@@ -33,5 +33,5 @@ interface IRateOracle {
         string calldata currency
     ) external view returns (uint256 rate, uint256 totalConfidence);
 
-    function setPriceFeed(string calldata currency, address priceFeedAddress) external;
+    function setPriceFeed(string calldata currency, address priceFeedAddress, uint8 decimals) external;
 }

@@ -92,7 +92,7 @@ contract LPRegistry is AccessControl, ReentrancyGuard, Pausable {
 
         lpData[msg.sender].stakedAmount -= amount;
         lpData[msg.sender].lastStakeChange = block.timestamp;
-        stakingToken.transfer(msg.sender, amount);
+        require(stakingToken.transfer(msg.sender, amount), "UNSTAKE_TRANSFER_FAILED");
 
         emit LPUnstaked(msg.sender, amount, lpData[msg.sender].stakedAmount);
     }
@@ -107,7 +107,7 @@ contract LPRegistry is AccessControl, ReentrancyGuard, Pausable {
 
         lpData[lpAddress].stakedAmount -= penaltyAmount;
         lpData[lpAddress].lastStakeChange = block.timestamp;
-        stakingToken.transfer(treasuryAddress, penaltyAmount); // Transfer to treasury
+        require(stakingToken.transfer(treasuryAddress, penaltyAmount), "SLASH_TRANSFER_FAILED"); // Transfer to treasury
 
         // If stake falls below minimum, mark as inactive
         if (lpData[lpAddress].stakedAmount < minStakeAmount) {
@@ -169,7 +169,7 @@ contract LPRegistry is AccessControl, ReentrancyGuard, Pausable {
     // --- Internal Helper Functions ---
 
     function _stake(address lpAddress, uint256 amount) internal {
-        stakingToken.transferFrom(lpAddress, address(this), amount);
+        require(stakingToken.transferFrom(lpAddress, address(this), amount), "STAKE_TRANSFER_FAILED");
         lpData[lpAddress].stakedAmount += amount;
         lpData[lpAddress].lastStakeChange = block.timestamp;
         emit LPStaked(lpAddress, amount, lpData[lpAddress].stakedAmount);
