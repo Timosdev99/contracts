@@ -1,9 +1,23 @@
 # Compiler files
 cache/
-out/
 
-# Ignores all broadcast logs
-/broadcast/
+# Ignore all Foundry outputs except selected ABIs and bindings
+out/*
+!out/bindings/
+!out/bindings/**
+!out/PaymentEscrow.sol/
+!out/PaymentEscrow.sol/**
+!out/OnRampEscrow.sol/
+!out/OnRampEscrow.sol/**
+!out/LPRegistry.sol/
+!out/LPRegistry.sol/**
+!out/RateOracle.sol/
+!out/RateOracle.sol/**
+!out/Relayer.sol/
+!out/Relayer.sol/**
+!/broadcast
+/broadcast/*/31337/
+/broadcast/**/dry-run/
 
 # Docs
 docs/

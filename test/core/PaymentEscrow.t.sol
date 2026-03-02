@@ -43,12 +43,7 @@ contract PaymentEscrowTest is Test {
         vm.startPrank(admin);
         usdc = new MockERC20("USD Coin", "USDC");
         lpRegistry = new LPRegistry(address(usdc), MIN_STAKE_AMOUNT, 500, treasury);
-        escrow = new PaymentEscrow(
-            feeCollector,
-            address(lpRegistry),
-            oracleWallet,
-            permissionSlipSigner
-        );
+        escrow = new PaymentEscrow(feeCollector, address(lpRegistry), oracleWallet, permissionSlipSigner);
         escrow.addSupportedToken(address(usdc));
         vm.stopPrank();
 
@@ -79,7 +74,7 @@ contract PaymentEscrowTest is Test {
         vm.stopPrank();
 
         IPaymentEscrow.Payment memory p = escrow.getPayment(paymentId);
-        assertEq(uint(p.status), uint(IPaymentEscrow.PaymentStatus.Pending));
+        assertEq(uint256(p.status), uint256(IPaymentEscrow.PaymentStatus.Pending));
         assertEq(p.amount, netAmount);
 
         // 2. --- Claim Payment ---
@@ -93,7 +88,7 @@ contract PaymentEscrowTest is Test {
         vm.stopPrank();
 
         p = escrow.getPayment(paymentId);
-        assertEq(uint(p.status), uint(IPaymentEscrow.PaymentStatus.Processing));
+        assertEq(uint256(p.status), uint256(IPaymentEscrow.PaymentStatus.Processing));
         assertEq(p.operator, lp);
 
         // 3. --- Confirm Settlement ---
@@ -104,7 +99,7 @@ contract PaymentEscrowTest is Test {
         vm.stopPrank();
 
         p = escrow.getPayment(paymentId);
-        assertEq(uint(p.status), uint(IPaymentEscrow.PaymentStatus.Completed));
+        assertEq(uint256(p.status), uint256(IPaymentEscrow.PaymentStatus.Completed));
         assertEq(usdc.balanceOf(address(escrow)), 0, "Escrow contract should be empty");
         assertEq(usdc.balanceOf(lp), lpInitialBalance + netAmount, "LP did not receive funds");
     }
@@ -155,7 +150,7 @@ contract PaymentEscrowTest is Test {
             bytes32 messageHash = keccak256(abi.encodePacked(paymentId, lp));
             (uint8 v, bytes32 r, bytes32 s) = vm.sign(PERMISSION_SIGNER_PK, messageHash);
             bytes memory permissionSlip = abi.encodePacked(r, s, v);
-            
+
             vm.startPrank(lp);
             escrow.claimPayment(paymentId, permissionSlip);
             vm.stopPrank();
@@ -176,7 +171,7 @@ contract PaymentEscrowTest is Test {
         usdc.approve(address(escrow), paymentAmount);
         paymentId = escrow.createPayment(address(usdc), paymentAmount, 75000, "NGN", keccak256("r"));
         vm.stopPrank();
-        
+
         netAmount = escrow.getPayment(paymentId).amount;
 
         uint256 deadline = escrow.getPayment(paymentId).deadline;
@@ -187,8 +182,29 @@ contract PaymentEscrowTest is Test {
         escrow.claimRefund(paymentId);
         vm.stopPrank();
 
-        assertEq(uint(escrow.getPayment(paymentId).status), uint(IPaymentEscrow.PaymentStatus.Refunded));
+        assertEq(uint256(escrow.getPayment(paymentId).status), uint256(IPaymentEscrow.PaymentStatus.Refunded));
         assertEq(usdc.balanceOf(address(escrow)), 0);
         assertEq(usdc.balanceOf(sender), senderInitialBalance + netAmount, "Sender did not get refund");
+    }
+
+    function test_Fail_Claim_After_Deadline() public {
+        uint256 paymentAmount = 100 * 1e6;
+
+        vm.startPrank(sender);
+        usdc.approve(address(escrow), paymentAmount);
+        bytes32 paymentId = escrow.createPayment(address(usdc), paymentAmount, 150000, "NGN", keccak256("r"));
+        vm.stopPrank();
+
+        uint256 deadline = escrow.getPayment(paymentId).deadline;
+        vm.warp(deadline + 1);
+
+        bytes32 messageHash = keccak256(abi.encodePacked(paymentId, lp));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(PERMISSION_SIGNER_PK, messageHash);
+        bytes memory permissionSlip = abi.encodePacked(r, s, v);
+
+        vm.startPrank(lp);
+        vm.expectRevert("PAYMENT_EXPIRED");
+        escrow.claimPayment(paymentId, permissionSlip);
+        vm.stopPrank();
     }
 }

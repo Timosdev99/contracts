@@ -12,6 +12,7 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 /// @dev The user is the buyer, the operator is the Liquidity Provider (LP).
 contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl {
     bytes32 public constant LP_ROLE = keccak256("LP_ROLE");
+    bytes32 public constant RELAYER_ROLE = keccak256("RELAYER_ROLE");
 
     // Order ID => Order
     mapping(bytes32 => OnRampOrder) public orders;
@@ -20,18 +21,22 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
     uint256 public lockDeadline = 10 minutes; // Time for LP to lock funds
     uint256 public paymentDeadline = 30 minutes; // Time for user to pay after funds are locked
 
+    // Optional per-LP caps by token (0 = unlimited)
+    mapping(address => mapping(address => uint256)) public lpCapByToken;
+    mapping(address => mapping(address => uint256)) public lpOutstandingByToken;
+
     constructor() {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(LP_ROLE, msg.sender); // Grant to deployer initially
+        _grantRole(RELAYER_ROLE, msg.sender); // Grant to deployer initially
     }
 
     /// @notice User creates an order to buy crypto
-    function createOnRampOrder(
-        address token,
-        uint256 tokenAmount,
-        uint256 fiatAmount,
-        string calldata fiatCurrency
-    ) external whenNotPaused returns (bytes32 orderId) {
+    function createOnRampOrder(address token, uint256 tokenAmount, uint256 fiatAmount, string calldata fiatCurrency)
+        external
+        whenNotPaused
+        returns (bytes32 orderId)
+    {
         require(tokenAmount > 0, "Token amount must be > 0");
 
         orderId = keccak256(abi.encodePacked(msg.sender, token, tokenAmount, block.timestamp));
@@ -55,17 +60,33 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
 
     /// @notice LP locks crypto funds in escrow for a pending order
     function lockFunds(bytes32 orderId) external nonReentrant onlyRole(LP_ROLE) {
+        _lockFunds(orderId, msg.sender);
+    }
+
+    /// @notice A relayer (backend) locks crypto funds in escrow on behalf of an LP.
+    /// @dev LPs grant a one-time allowance to the relayer, which implies ongoing trust in relayer operation.
+    /// @param orderId The ID of the order for which funds are being locked.
+    /// @param lpAddress The address of the LP whose funds are being locked.
+    function lockFundsByRelayer(bytes32 orderId, address lpAddress) external nonReentrant onlyRole(RELAYER_ROLE) {
+        _lockFunds(orderId, lpAddress);
+    }
+
+    /// @dev Internal helper function to handle the actual logic of locking funds.
+    function _lockFunds(bytes32 orderId, address _lpAddress) internal {
         OnRampOrder storage order = orders[orderId];
         require(order.status == OrderStatus.Pending, "Order not pending");
         require(block.timestamp <= order.createdAt + lockDeadline, "Lock deadline passed");
+        require(hasRole(LP_ROLE, _lpAddress), "LP_ROLE_REQUIRED"); // Ensure the specified address is an LP
+        _applyLpCap(_lpAddress, order.token, order.tokenAmount);
 
-        order.lp = msg.sender;
+        order.lp = _lpAddress;
         order.status = OrderStatus.FundsLocked;
         order.fundsLockedAt = block.timestamp;
 
-        require(IERC20(order.token).transferFrom(msg.sender, address(this), order.tokenAmount), "LOCK_TRANSFER_FAILED");
+        require(IERC20(order.token).transferFrom(_lpAddress, address(this), order.tokenAmount), "LOCK_TRANSFER_FAILED");
 
-        emit FundsLocked(orderId, msg.sender, order.tokenAmount);
+        _increaseOutstanding(_lpAddress, order.token, order.tokenAmount);
+        emit FundsLocked(orderId, _lpAddress, order.tokenAmount);
     }
 
     /// @notice User confirms they have sent the fiat payment off-chain
@@ -89,6 +110,7 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
 
         order.status = OrderStatus.Completed;
         require(IERC20(order.token).transfer(order.buyer, order.tokenAmount), "RELEASE_TRANSFER_FAILED");
+        _decreaseOutstanding(order.lp, order.token, order.tokenAmount);
 
         emit OrderCompleted(orderId, order.buyer);
     }
@@ -102,10 +124,11 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
 
         order.status = OrderStatus.Cancelled;
         require(IERC20(order.token).transfer(order.lp, order.tokenAmount), "RECLAIM_TRANSFER_FAILED");
+        _decreaseOutstanding(order.lp, order.token, order.tokenAmount);
 
         emit OrderCancelled(orderId, "User payment timed out");
     }
-    
+
     /// @notice Buyer can cancel if LP fails to lock funds in time
     function cancelOrder(bytes32 orderId) external {
         OnRampOrder storage order = orders[orderId];
@@ -137,10 +160,12 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
         if (releaseToBuyer) {
             order.status = OrderStatus.Completed;
             require(IERC20(order.token).transfer(order.buyer, order.tokenAmount), "DISPUTE_BUYER_TRANSFER_FAILED");
+            _decreaseOutstanding(order.lp, order.token, order.tokenAmount);
             emit DisputeResolved(orderId, msg.sender, order.buyer);
         } else {
             order.status = OrderStatus.Cancelled;
             require(IERC20(order.token).transfer(order.lp, order.tokenAmount), "DISPUTE_LP_TRANSFER_FAILED");
+            _decreaseOutstanding(order.lp, order.token, order.tokenAmount);
             emit DisputeResolved(orderId, msg.sender, order.lp);
         }
     }
@@ -155,6 +180,11 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
         paymentDeadline = newDeadline;
     }
 
+    function setLpCap(address lp, address token, uint256 cap) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        lpCapByToken[lp][token] = cap;
+        emit LpCapSet(lp, token, cap);
+    }
+
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
@@ -166,5 +196,25 @@ contract OnRampEscrow is IOnRampEscrow, ReentrancyGuard, Pausable, AccessControl
     /// @notice Get an order's details
     function getOrder(bytes32 orderId) external view returns (OnRampOrder memory) {
         return orders[orderId];
+    }
+
+    function _applyLpCap(address lp, address token, uint256 amount) internal view {
+        uint256 cap = lpCapByToken[lp][token];
+        if (cap == 0) {
+            return;
+        }
+        require(lpOutstandingByToken[lp][token] + amount <= cap, "LP_CAP_EXCEEDED");
+    }
+
+    function _increaseOutstanding(address lp, address token, uint256 amount) internal {
+        uint256 newOutstanding = lpOutstandingByToken[lp][token] + amount;
+        lpOutstandingByToken[lp][token] = newOutstanding;
+        emit LpOutstandingUpdated(lp, token, newOutstanding);
+    }
+
+    function _decreaseOutstanding(address lp, address token, uint256 amount) internal {
+        uint256 newOutstanding = lpOutstandingByToken[lp][token] - amount;
+        lpOutstandingByToken[lp][token] = newOutstanding;
+        emit LpOutstandingUpdated(lp, token, newOutstanding);
     }
 }

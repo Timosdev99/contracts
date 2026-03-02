@@ -36,7 +36,8 @@ contract LPRegistryTest is Test {
         usdc.mint(lp2, INITIAL_LP_BALANCE);
     }
 
-    function test_Constructor() public view { // Changed to public view
+    function test_Constructor() public view {
+        // Changed to public view
         assertEq(address(lpRegistry.stakingToken()), address(usdc));
         assertEq(lpRegistry.minStakeAmount(), MIN_STAKE);
         assertEq(lpRegistry.slashingPenaltyPercent(), SLASH_PERCENT);
@@ -146,7 +147,11 @@ contract LPRegistryTest is Test {
         test_RegisterLP_Success();
 
         vm.startPrank(lp1); // lp1 tries to slash
-        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, lp1, lpRegistry.SLASHER_ROLE()));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControl.AccessControlUnauthorizedAccount.selector, lp1, lpRegistry.SLASHER_ROLE()
+            )
+        );
         lpRegistry.slash(lp1, 100);
         vm.stopPrank();
     }
