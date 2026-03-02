@@ -106,6 +106,7 @@ contract PaymentEscrow is IPaymentEscrow, ReentrancyGuard, Pausable, AccessContr
     function claimPayment(bytes32 paymentId, bytes calldata permissionSlip) external whenNotPaused {
         Payment storage payment = payments[paymentId];
         require(payment.status == PaymentStatus.Pending, "NOT_PENDING");
+        require(block.timestamp <= payment.deadline, "PAYMENT_EXPIRED");
         require(lpRegistry.isLPActive(msg.sender), "NOT_ACTIVE_LP");
 
         // Verify the permission slip was signed by the trusted signer for this specific payment and LP

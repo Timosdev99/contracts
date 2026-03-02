@@ -43,22 +43,19 @@ interface IOnRampEscrow {
     event OrderCompleted(bytes32 indexed orderId, address indexed buyer);
     event OrderCancelled(bytes32 indexed orderId, string reason);
     event OrderDisputed(bytes32 indexed orderId, address indexed reporter);
-    event DisputeResolved(
-        bytes32 indexed orderId,
-        address indexed resolver,
-        address winner
-    );
+    event DisputeResolved(bytes32 indexed orderId, address indexed resolver, address winner);
+    event LpCapSet(address indexed lp, address indexed token, uint256 cap);
+    event LpOutstandingUpdated(address indexed lp, address indexed token, uint256 newOutstanding);
 
     // --- Functions ---
 
-    function createOnRampOrder(
-        address token,
-        uint256 tokenAmount,
-        uint256 fiatAmount,
-        string calldata fiatCurrency
-    ) external returns (bytes32 orderId);
+    function createOnRampOrder(address token, uint256 tokenAmount, uint256 fiatAmount, string calldata fiatCurrency)
+        external
+        returns (bytes32 orderId);
 
     function lockFunds(bytes32 orderId) external;
+
+    function lockFundsByRelayer(bytes32 orderId, address lpAddress) external;
 
     function confirmFiatSent(bytes32 orderId, bytes32 proofHash) external;
 
@@ -76,9 +73,15 @@ interface IOnRampEscrow {
 
     function setPaymentDeadline(uint256 newDeadline) external;
 
+    function setLpCap(address lp, address token, uint256 cap) external;
+
     function pause() external;
 
     function unpause() external;
 
     function getOrder(bytes32 orderId) external view returns (OnRampOrder memory);
+
+    function lpCapByToken(address lp, address token) external view returns (uint256);
+
+    function lpOutstandingByToken(address lp, address token) external view returns (uint256);
 }

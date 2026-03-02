@@ -7,9 +7,10 @@ import {LPRegistry} from "../src/core/LPRegistry.sol";
 import {OnRampEscrow} from "../src/core/OnRampEscrow.sol";
 import {PaymentEscrow} from "../src/core/PaymentEscrow.sol";
 import {MockERC20} from "../test/MockERC20.sol";
+import {Relayer} from "../src/Relayer.sol";
 
 contract Deploy is Script {
-    function run() external returns (RateOracle, LPRegistry, OnRampEscrow, PaymentEscrow, MockERC20) {
+    function run() external returns (RateOracle, LPRegistry, OnRampEscrow, PaymentEscrow, MockERC20, Relayer) {
         vm.startBroadcast();
 
         // --- Deploy Mock Staking Token ---
@@ -23,26 +24,20 @@ contract Deploy is Script {
         // minStakeAmount: 500 tokens
         // slashingPenaltyPercent: 5% (500 basis points)
         // treasuryAddress: Read from TREASURY_ADDRESS env var
-        LPRegistry lpRegistry = new LPRegistry(
-            address(stakingToken),
-            500 * 1e18,
-            500,
-            vm.envAddress("TREASURY_ADDRESS")
-        );
+        LPRegistry lpRegistry =
+            new LPRegistry(address(stakingToken), 500 * 1e18, 500, vm.envAddress("TREASURY_ADDRESS"));
 
         // --- Deploy OnRampEscrow ---
         OnRampEscrow onRampEscrow = new OnRampEscrow();
+
+        // --- Deploy Relayer ---
+        Relayer relayer = new Relayer(address(onRampEscrow));
 
         // --- Deploy PaymentEscrow ---
         // feeCollector: deployer wallet
         // oracleWallet: deployer wallet
         // permissionSlipSigner: deployer wallet
-        PaymentEscrow paymentEscrow = new PaymentEscrow(
-            msg.sender,
-            address(lpRegistry),
-            msg.sender,
-            msg.sender
-        );
+        PaymentEscrow paymentEscrow = new PaymentEscrow(msg.sender, address(lpRegistry), msg.sender, msg.sender);
 
         // --- Post-Deployment Configuration ---
 
@@ -53,10 +48,13 @@ contract Deploy is Script {
         // Grant the deployer the LP_ROLE in OnRampEscrow
         onRampEscrow.grantRole(onRampEscrow.LP_ROLE(), msg.sender);
 
+        // Grant the Relayer contract the RELAYER_ROLE in OnRampEscrow
+        onRampEscrow.grantRole(onRampEscrow.RELAYER_ROLE(), address(relayer));
+
         // Add the mock staking token as a supported token in PaymentEscrow
         paymentEscrow.addSupportedToken(address(stakingToken));
 
         vm.stopBroadcast();
-        return (rateOracle, lpRegistry, onRampEscrow, paymentEscrow, stakingToken);
+        return (rateOracle, lpRegistry, onRampEscrow, paymentEscrow, stakingToken, relayer);
     }
 }

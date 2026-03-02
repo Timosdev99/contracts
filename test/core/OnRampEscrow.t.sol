@@ -5,14 +5,15 @@ import "forge-std/Test.sol";
 import "src/core/OnRampEscrow.sol";
 import "src/interfaces/IOnRampEscrow.sol";
 import "test/core/PaymentEscrow.t.sol"; // To reuse MockERC20
+import "src/Relayer.sol";
 
 contract OnRampEscrowTest is Test {
     OnRampEscrow public escrow;
     MockERC20 public usdc;
 
-    address public admin = address(0x1);
+    address public admin = address(0xA);
     address public buyer = address(0x7);
-    address public lp = address(0x8); // Liquidity Provider
+    address public lp = address(0xB); // Liquidity Provider
 
     uint256 public constant INITIAL_LP_BALANCE = 1_000_000 * 1e6; // 1M USDC
 
@@ -34,28 +35,28 @@ contract OnRampEscrowTest is Test {
         // 1. Buyer creates an order
         vm.prank(buyer);
         bytes32 orderId = escrow.createOnRampOrder(address(usdc), tokenAmount, fiatAmount, "NGN");
-        assertEq(uint(escrow.getOrder(orderId).status), uint(IOnRampEscrow.OrderStatus.Pending));
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.Pending));
 
         // 2. LP locks the funds
         vm.prank(lp);
         usdc.approve(address(escrow), tokenAmount);
         vm.prank(lp);
         escrow.lockFunds(orderId);
-        
+
         assertEq(usdc.balanceOf(address(escrow)), tokenAmount, "Escrow balance incorrect");
-        assertEq(uint(escrow.getOrder(orderId).status), uint(IOnRampEscrow.OrderStatus.FundsLocked));
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.FundsLocked));
 
         // 3. Buyer confirms they have sent the fiat
         vm.prank(buyer);
         escrow.confirmFiatSent(orderId, keccak256("proof_of_payment"));
-        assertEq(uint(escrow.getOrder(orderId).status), uint(IOnRampEscrow.OrderStatus.FiatSent));
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.FiatSent));
 
         // 4. LP confirms fiat receipt and releases the crypto
         uint256 buyerInitialBalance = usdc.balanceOf(buyer);
         vm.prank(lp);
         escrow.releaseFunds(orderId);
 
-        assertEq(uint(escrow.getOrder(orderId).status), uint(IOnRampEscrow.OrderStatus.Completed));
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.Completed));
         assertEq(usdc.balanceOf(buyer), buyerInitialBalance + tokenAmount, "Buyer did not receive crypto");
         assertEq(usdc.balanceOf(address(escrow)), 0, "Escrow should be empty");
     }
@@ -81,7 +82,7 @@ contract OnRampEscrowTest is Test {
         vm.prank(lp);
         escrow.reclaimLockedFunds(orderId);
 
-        assertEq(uint(escrow.getOrder(orderId).status), uint(IOnRampEscrow.OrderStatus.Cancelled));
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.Cancelled));
         assertEq(usdc.balanceOf(lp), lpInitialBalance + tokenAmount, "LP did not get funds back");
         assertEq(usdc.balanceOf(address(escrow)), 0);
     }
@@ -100,7 +101,7 @@ contract OnRampEscrowTest is Test {
         vm.prank(buyer);
         escrow.cancelOrder(orderId);
 
-        assertEq(uint(escrow.getOrder(orderId).status), uint(IOnRampEscrow.OrderStatus.Cancelled));
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.Cancelled));
     }
 
     /// Test the full dispute and resolution flow
@@ -120,19 +121,19 @@ contract OnRampEscrowTest is Test {
         // 2. LP disputes the payment (e.g., claims they never received fiat)
         vm.prank(lp);
         escrow.disputeOrder(orderId);
-        assertEq(uint(escrow.getOrder(orderId).status), uint(IOnRampEscrow.OrderStatus.Disputed));
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.Disputed));
 
         // 3. Admin resolves in favor of the LP (gives crypto back to LP)
         uint256 lpInitialBalance = usdc.balanceOf(lp);
         vm.prank(admin);
         escrow.resolveDispute(orderId, false); // false = release to LP
 
-        assertEq(uint(escrow.getOrder(orderId).status), uint(IOnRampEscrow.OrderStatus.Cancelled));
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.Cancelled));
         assertEq(usdc.balanceOf(lp), lpInitialBalance + tokenAmount, "LP did not get dispute refund");
         assertEq(usdc.balanceOf(address(escrow)), 0);
 
         // --- New scenario: Resolve in favor of buyer ---
-        
+
         // 1. Create and process another payment
         vm.prank(buyer);
         bytes32 orderId2 = escrow.createOnRampOrder(address(usdc), tokenAmount, 300000, "NGN");
@@ -152,8 +153,151 @@ contract OnRampEscrowTest is Test {
         vm.prank(admin);
         escrow.resolveDispute(orderId2, true); // true = release to buyer
 
-        assertEq(uint(escrow.getOrder(orderId2).status), uint(IOnRampEscrow.OrderStatus.Completed));
+        assertEq(uint256(escrow.getOrder(orderId2).status), uint256(IOnRampEscrow.OrderStatus.Completed));
         assertEq(usdc.balanceOf(buyer), buyerInitialBalance + tokenAmount, "Buyer did not get dispute win funds");
         assertEq(usdc.balanceOf(address(escrow)), 0);
+    }
+
+    function test_RelayerLocksFunds() public {
+        uint256 tokenAmount = 100 * 1e6; // 100 USDC
+
+        //Deploy Relayer (test contract)
+        Relayer testRelayer = new Relayer(address(escrow));
+
+        //Grant RELAYER_ROLE to the Relayer contract itself in OnRampEscrow
+        bytes32 relayerRole = escrow.RELAYER_ROLE();
+        vm.prank(admin); //Admin still grants this role on escrow
+        escrow.grantRole(relayerRole, address(testRelayer));
+
+        //LP approves the escrow to spend tokens
+        vm.prank(lp);
+        usdc.approve(address(escrow), tokenAmount);
+
+        //Buyer creates an order
+        vm.prank(buyer);
+        bytes32 orderId = escrow.createOnRampOrder(address(usdc), tokenAmount, 150000, "NGN");
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.Pending));
+
+        //Relayer admin calls lockFundsForLP
+        testRelayer.lockFundsForLP(orderId, lp);
+
+        assertEq(usdc.balanceOf(address(escrow)), tokenAmount, "Escrow balance incorrect");
+        assertEq(uint256(escrow.getOrder(orderId).status), uint256(IOnRampEscrow.OrderStatus.FundsLocked));
+        assertEq(escrow.getOrder(orderId).lp, lp, "LP address in order incorrect");
+    }
+
+    function test_RelayerRejectsNonOwner() public {
+        uint256 tokenAmount = 100 * 1e6;
+        Relayer testRelayer = new Relayer(address(escrow));
+
+        bytes32 relayerRole = escrow.RELAYER_ROLE();
+        vm.prank(admin);
+        escrow.grantRole(relayerRole, address(testRelayer));
+
+        vm.prank(lp);
+        usdc.approve(address(testRelayer), tokenAmount);
+
+        vm.prank(buyer);
+        bytes32 orderId = escrow.createOnRampOrder(address(usdc), tokenAmount, 150000, "NGN");
+
+        vm.prank(address(0xC));
+        vm.expectRevert(bytes("Unauthorized"));
+        testRelayer.lockFundsForLP(orderId, lp);
+    }
+
+    function test_RelayerMissingRoleReverts() public {
+        uint256 tokenAmount = 100 * 1e6;
+        Relayer testRelayer = new Relayer(address(escrow));
+
+        vm.prank(lp);
+        usdc.approve(address(testRelayer), tokenAmount);
+
+        vm.prank(buyer);
+        bytes32 orderId = escrow.createOnRampOrder(address(usdc), tokenAmount, 150000, "NGN");
+
+        vm.expectRevert();
+        testRelayer.lockFundsForLP(orderId, lp);
+    }
+
+    function test_RelayerMissingAllowanceReverts() public {
+        uint256 tokenAmount = 100 * 1e6;
+        Relayer testRelayer = new Relayer(address(escrow));
+
+        bytes32 relayerRole = escrow.RELAYER_ROLE();
+        vm.prank(admin);
+        escrow.grantRole(relayerRole, address(testRelayer));
+
+        vm.prank(buyer);
+        bytes32 orderId = escrow.createOnRampOrder(address(usdc), tokenAmount, 150000, "NGN");
+
+        vm.expectRevert();
+        testRelayer.lockFundsForLP(orderId, lp);
+    }
+
+    function test_LpCapEnforcedOnRelayedLock() public {
+        uint256 tokenAmount = 100 * 1e6;
+        Relayer testRelayer = new Relayer(address(escrow));
+
+        bytes32 relayerRole = escrow.RELAYER_ROLE();
+        vm.prank(admin);
+        escrow.grantRole(relayerRole, address(testRelayer));
+
+        vm.prank(admin);
+        escrow.setLpCap(lp, address(usdc), 60 * 1e6);
+
+        vm.prank(lp);
+        usdc.approve(address(testRelayer), tokenAmount);
+
+        vm.prank(buyer);
+        bytes32 orderId = escrow.createOnRampOrder(address(usdc), tokenAmount, 150000, "NGN");
+
+        vm.expectRevert(bytes("LP_CAP_EXCEEDED"));
+        testRelayer.lockFundsForLP(orderId, lp);
+    }
+
+    function test_LpOutstandingUpdatesOnRelease() public {
+        uint256 tokenAmount = 100 * 1e6;
+
+        vm.prank(lp);
+        usdc.approve(address(escrow), tokenAmount);
+
+        vm.prank(buyer);
+        bytes32 orderId = escrow.createOnRampOrder(address(usdc), tokenAmount, 150000, "NGN");
+
+        vm.prank(lp);
+        escrow.lockFunds(orderId);
+
+        assertEq(escrow.lpOutstandingByToken(lp, address(usdc)), tokenAmount);
+
+        vm.prank(buyer);
+        escrow.confirmFiatSent(orderId, keccak256("proof_of_payment"));
+
+        vm.prank(lp);
+        escrow.releaseFunds(orderId);
+
+        assertEq(escrow.lpOutstandingByToken(lp, address(usdc)), 0);
+    }
+
+    function test_LpOutstandingUpdatesOnReclaim() public {
+        uint256 tokenAmount = 100 * 1e6;
+
+        vm.prank(lp);
+        usdc.approve(address(escrow), tokenAmount);
+
+        vm.prank(buyer);
+        bytes32 orderId = escrow.createOnRampOrder(address(usdc), tokenAmount, 150000, "NGN");
+
+        vm.prank(lp);
+        escrow.lockFunds(orderId);
+
+        assertEq(escrow.lpOutstandingByToken(lp, address(usdc)), tokenAmount);
+
+        uint256 deadline = escrow.getOrder(orderId).fundsLockedAt + escrow.paymentDeadline();
+        vm.warp(deadline + 1);
+
+        vm.prank(lp);
+        escrow.reclaimLockedFunds(orderId);
+
+        assertEq(escrow.lpOutstandingByToken(lp, address(usdc)), 0);
     }
 }

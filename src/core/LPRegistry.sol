@@ -16,7 +16,7 @@ contract LPRegistry is AccessControl, ReentrancyGuard, Pausable {
 
     struct LPInfo {
         bool isRegistered;
-        bool isActive;          // Can be set to false if stake is too low or admin pauses
+        bool isActive; // Can be set to false if stake is too low or admin pauses
         uint256 stakedAmount;
         uint256 lastStakeChange; // Timestamp of last stake/unstake
     }
@@ -42,7 +42,12 @@ contract LPRegistry is AccessControl, ReentrancyGuard, Pausable {
 
     // --- Constructor ---
 
-    constructor(address _stakingToken, uint256 _minStakeAmount, uint256 _slashingPenaltyPercent, address _treasuryAddress) {
+    constructor(
+        address _stakingToken,
+        uint256 _minStakeAmount,
+        uint256 _slashingPenaltyPercent,
+        address _treasuryAddress
+    ) {
         require(_stakingToken != address(0), "Invalid staking token address");
         require(_minStakeAmount > 0, "Min stake must be greater than 0");
         require(_slashingPenaltyPercent <= 10000, "Slashing percent too high"); // Max 100%

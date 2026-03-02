@@ -39,11 +39,7 @@ interface IPaymentEscrow {
         uint256 fiatAmount
     );
 
-    event PaymentProcessing(
-        bytes32 indexed paymentId,
-        address indexed operator,
-        string bankReference
-    );
+    event PaymentProcessing(bytes32 indexed paymentId, address indexed operator, string bankReference);
 
     event PaymentCompleted(bytes32 indexed paymentId, bytes32 proofHash);
 
